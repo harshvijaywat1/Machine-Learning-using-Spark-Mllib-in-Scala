@@ -1,0 +1,55 @@
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.feature.Word2Vec
+import org.apache.spark.ml.linalg.Vector
+
+import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
+
+case class TweetLabel(label : Int, tweet : String)
+
+val data = sc.textFile("/home/harsh/Desktop/twitter sentiment/2477_4140_bundle_archive/training.1600000.processed.noemoticon.csv").map(_.split(",")).map(attributes => TweetLabel(attributes(0).replace("\"","").toInt, attributes(5).replace("\"","").toLowerCase()
+      .replaceAll("\n", "")
+      .replaceAll("rt\\s+", "")
+      .replaceAll("\\s+@\\w+", "")
+      .replaceAll("@\\w+", "")
+      .replaceAll("\\s+#\\w+", "")
+      .replaceAll("#\\w+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+", "")
+      .trim() 
+  )).toDF()
+
+val tokenizer = new Tokenizer().setInputCol("tweet").setOutputCol("words")
+val wordsData = tokenizer.transform(data)
+
+val word2vec = new Word2Vec()
+                   .setInputCol("words")
+                   .setOutputCol("features")
+                   .setVectorSize(15)
+                   
+val mod = word2vec.fit(wordsData)
+
+val pp = mod.transform(wordsData) 
+
+
+
+val rf = new RandomForestClassifier()
+  .setLabelCol("label")
+  .setFeaturesCol("features")
+  .setNumTrees(10)
+
+val model = rf.fit(pp)
+
+
+
+case class Tweet (tweet: String)
+
+val test  = Seq( Tweet("he is good"),Tweet("he is not bad"),Tweet("he is dangerous"),Tweet("he is "),Tweet("he can do"),Tweet("he can't do") ).toDF
+
+val wordsData1 = tokenizer.transform(test)
+
+val pp1 = mod.transform(wordsData1) 
+
+val predictions = model.transform(pp1)
+

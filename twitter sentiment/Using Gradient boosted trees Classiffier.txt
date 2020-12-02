@@ -1,0 +1,78 @@
+import org.apache.spark.ml.classification.{GBTClassificationModel, GBTClassifier}
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.feature.Word2Vec
+import org.apache.spark.ml.feature.StopWordsRemover
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.classification.LogisticRegression
+import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
+import org.apache.spark.ml.tuning.{CrossValidator, ParamGridBuilder}
+import org.apache.spark.ml.classification.NaiveBayes
+
+case class TweetLabel(label : Int, tweet : String)
+
+val data = sc.textFile("/home/harsh/Desktop/twitter sentiment/2477_4140_bundle_archive/training.1600000.processed.noemoticon.csv").map(_.split(",")).map(attributes => TweetLabel(attributes(0).replace("\"","").toInt, attributes(5).replace("\"","").toLowerCase()
+      .replaceAll("\n", "")
+      .replaceAll("rt\\s+", "")
+      .replaceAll("\\s+@\\w+", "")
+      .replaceAll("@\\w+", "")
+      .replaceAll("\\s+#\\w+", "")
+      .replaceAll("#\\w+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+", "")
+      .trim() 
+  )).toDF()
+
+
+
+val tokenizer = new Tokenizer().setInputCol("tweet").setOutputCol("words")
+val wordsData = tokenizer.transform(data)
+
+val hashingTF = new HashingTF()
+  .setInputCol("words").setOutputCol("rawFeatures").setNumFeatures(1000)
+
+val featurizedData = hashingTF.transform(wordsData)
+
+val idf = new IDF().setInputCol("rawFeatures").setOutputCol("features")
+val idfModel = idf.fit(featurizedData)
+
+val rescaledData = idfModel.transform(featurizedData)
+
+
+val df = rescaledData.filter("tweet <>'' ")
+
+def lo(d:Double) :Double = {if(d==4){1} else{0}}
+val lco = udf(lo _)
+val p = df.select( (lco($"label")).alias("label"), $"tweet",$"words",$"rawFeatures",$"features")
+
+val Array(training, test) = p.randomSplit(Array[Double](0.8,0.2))
+
+
+
+val gbt = new GBTClassifier()
+.setLabelCol("label")
+.setFeaturesCol("features")
+.setMaxIter(15)
+.setFeatureSubsetStrategy("all")
+.setMaxDepth(10)
+
+
+val paramGrid = new ParamGridBuilder()
+                     .addGrid(gbt.featureSubsetStrategy, Array("auto","all"))
+                     .addGrid(gbt.maxDepth, Array(5,10))
+                     .addGrid(gbt.maxIter, Array(10,15))
+                     .build()    
+
+val cv = new CrossValidator()
+             .setEstimator(gbt)
+             .setEvaluator(new BinaryClassificationEvaluator())
+             .setEstimatorParamMaps(paramGrid)
+             .setNumFolds(3) 
+             .setParallelism(2) 
+
+val model = cv.fit(training)
+val predictions = model.transform(test)

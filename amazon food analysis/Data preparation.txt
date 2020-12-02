@@ -1,0 +1,116 @@
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+import com.johnsnowlabs.nlp.annotator._
+import com.johnsnowlabs.nlp.base._
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import spark.implicits._
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.feature.StopWordsRemover
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.classification.LogisticRegression
+
+val df = spark.read.
+                    format("csv")
+                    .option("header","true")
+                    .option("inferSchema","true")
+                    .load("/home/harsh/Desktop/amazon food/Reviews.csv") 
+
+val n = df.filter("Score !=3")
+
+def lo(i:Int) :Int = { if(i>3){1} else{0} }
+val labelling = udf(lo _)
+
+val fine = n.select(labelling($"Score").alias("label"), $"HelpfulnessNumerator", $"HelpfulnessDenominator", $"Summary", $"Text" )
+
+val consistent = fine.filter($"HelpfulnessNumerator" <= $"HelpfulnessDenominator")
+
+def prep(d:String) :String = { d.replace("\"","").toLowerCase()
+      .replaceAll("\n", "")
+      .replaceAll("rt\\s+", "")
+      .replaceAll("\\s+@\\w+", "")
+      .replaceAll("@\\w+", "")
+      .replaceAll("\\s+#\\w+", "")
+      .replaceAll("#\\w+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+", "")
+      .replaceAll("[^\u0000-\uFFFF]","")
+      .replaceAll("(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])","")
+      .trim() 
+}
+val preProcess = udf(prep _)
+
+val data = consistent.select($"label", $"HelpfulnessNumerator", $"HelpfulnessDenominator", concat(preProcess($"Summary"), lit(" "), preProcess($"Text")).alias("text"))
+
+
+val document = new DocumentAssembler()
+    .setInputCol("text")
+    .setOutputCol("document")
+
+val d1 = document.transform(data)
+
+val token = new Tokenizer()
+    .setInputCols("document")
+    .setOutputCol("token")
+
+val t1 = token.fit(d1).transform(d1)
+
+val normalizer = new Normalizer()
+    .setInputCols("token")
+    .setOutputCol("normal")
+
+val n1 = normalizer.fit(t1).transform(t1)
+
+val stemmer = new Stemmer()
+    .setInputCols("normal")
+    .setOutputCol("stem")
+
+val s1 = stemmer.transform(n1)
+
+val finisher = new Finisher()
+    .setInputCols("stem")
+    .setOutputCols("final")
+
+val f1 = finisher.transform(s1)
+
+
+
+
+
+val hashingTF = new HashingTF()
+.setInputCol("filtered").setOutputCol("rawFeatures").setNumFeatures(10000)
+
+val featurizedData = hashingTF.transform(f1)
+
+val idf = new IDF().setInputCol("rawFeatures").setOutputCol("features")
+
+val idfModel = idf.fit(featurizedData)
+
+val rescaledData = idfModel.transform(featurizedData)
+
+def dbl(i:String) :Double = { i.toDouble }
+val dbli = udf(dbl _)
+
+val final_data = rescaledData.select($"label",dbli($"HelpfulnessNumerator").alias("HelpfulnessNumerator"),dbli($"HelpfulnessDenominator").alias("HelpfulnessDenominator"),$"features")
+
+val assembler = new VectorAssembler()
+  .setInputCols(Array("HelpfulnessNumerator", "HelpfulnessDenominator", "features"))
+  .setOutputCol("finalFeatures")
+
+val output = assembler.transform(final_data)
+
+val datr  = output.select($"label",$"finalFeatures".alias("features"))
+ 
+val Array(training, test) = datr.randomSplit(Array[Double](0.8,0.2))
+
+
+
+
+
+
+

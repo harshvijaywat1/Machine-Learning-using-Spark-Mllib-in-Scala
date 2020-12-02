@@ -1,0 +1,81 @@
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.feature.Word2Vec
+import org.apache.spark.ml.feature.StopWordsRemover
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.classification.LogisticRegression
+import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
+import org.apache.spark.ml.tuning.{CrossValidator, ParamGridBuilder}
+import org.apache.spark.ml.classification.NaiveBayes
+import org.apache.spark.ml.classification.{GBTClassificationModel, GBTClassifier}
+import util.control.Breaks._
+import org.apache.spark.ml.feature.{IndexToString, StringIndexer}
+
+case class TweetLabel(label : String, tweet : String)
+
+val df = spark.read.
+                    format("csv")
+                    .option("header","true")
+                    .option("inferSchema","true")
+                    .load("/home/harsh/Desktop/twitter airlines/Tweets.csv") 
+
+val raw = df.select($"airline_sentiment".alias("label"),$"text".alias("tweet"))
+val nr = raw.na.drop()
+
+val indexer = new StringIndexer()
+  .setInputCol("label")
+  .setOutputCol("labelIndex")
+val indexed = indexer.fit(nr).transform(nr)
+
+def lo(d:String) :String = { d.replace("\"","").toLowerCase()
+      .replaceAll("\n", "")
+      .replaceAll("rt\\s+", "")
+      .replaceAll("\\s+@\\w+", "")
+      .replaceAll("@\\w+", "")
+      .replaceAll("\\s+#\\w+", "")
+      .replaceAll("#\\w+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+", "")
+      .replaceAll("[^\u0000-\uFFFF]","")
+      .replaceAll("(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])","")
+      .trim() 
+}
+val lco = udf(lo _)
+val f = indexed.select($"label", $"labelIndex",lco($"tweet").alias("tweet"))
+
+val tokenizer = new Tokenizer().setInputCol("tweet").setOutputCol("words")
+val wordsData = tokenizer.transform(f)
+
+val hashingTF = new HashingTF()
+  .setInputCol("words").setOutputCol("rawFeatures").setNumFeatures(10000)
+
+val featurizedData = hashingTF.transform(wordsData)
+
+val idf = new IDF().setInputCol("rawFeatures").setOutputCol("features")
+val idfModel = idf.fit(featurizedData)
+
+val rescaledData = idfModel.transform(featurizedData)
+
+val Array(training, test) = rescaledData.randomSplit(Array[Double](0.8,0.2))
+
+val lr = new LogisticRegression().setMaxIter(10).setRegParam(0.01).setLabelCol("labelIndex").setElasticNetParam(0.5)
+
+val model = lr.fit(training) 
+
+val evaluator = new MulticlassClassificationEvaluator()
+                    .setLabelCol("labelIndex") 
+                    .setPredictionCol("prediction") 
+                    .setMetricName("accuracy") 
+val predict_training = model.transform(training)
+val predict_test = model.transform(test)
+val train_accuracy = evaluator.evaluate(predict_training)   
+val test_accuracy = evaluator.evaluate(predict_test)   
+
+
+
+
+

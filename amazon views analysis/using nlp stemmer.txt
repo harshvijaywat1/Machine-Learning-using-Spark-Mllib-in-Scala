@@ -1,0 +1,128 @@
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+import com.johnsnowlabs.nlp.annotator._
+import com.johnsnowlabs.nlp.base._
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import spark.implicits._
+case class AmzView(label : Int, view : String)
+val train_path = "/home/harsh/Desktop/amazon views/1305_800230_compressed_train.ft.txt.bz2/train.ft.txt"
+val test_path = "/home/harsh/Desktop/amazon views/1305_800230_compressed_test.ft.txt.bz2/test.ft.txt"
+
+def pre_process(path:String) = { 
+val data = spark.sparkContext.textFile(path).map(attributes => AmzView(attributes(9), attributes.substring(11, attributes.length()).replace("\"","").toLowerCase()
+      .replaceAll("\n", "")
+      .replaceAll("rt\\s+", "")
+      .replaceAll("\\s+@\\w+", "")
+      .replaceAll("@\\w+", "")
+      .replaceAll("\\s+#\\w+", "")
+      .replaceAll("#\\w+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+", "")
+      .replaceAll("[^\u0000-\uFFFF]","")
+      .replaceAll("(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])","") 
+     .trim() 
+  )).toDF()
+
+def mo(d:Int) :Int = {if(d==49){2} else{1}}
+val lmo = spark.udf.register("mo", mo _)
+val p = data.select( (lmo($"label")).alias("label"), $"view")
+def mpo(d:Int) :String = {if(d==2){"negative"} else{"positive"}}
+val po = spark.udf.register("mpo", mpo _)
+val pl = p.select( (po($"label")).alias("sentiment"), $"view", $"label")
+pl
+}
+
+val training = pre_process(train_path)
+val testing = pre_process(test_path)
+
+val document = new DocumentAssembler()
+    .setInputCol("view")
+    .setOutputCol("document")
+
+val d1 = document.transform(training)
+
+val token = new Tokenizer()
+    .setInputCols("document")
+    .setOutputCol("token")
+
+val t1 = token.fit(d1).transform(d1)
+
+val normalizer = new Normalizer()
+    .setInputCols("token")
+    .setOutputCol("normal")
+
+val n1 = normalizer.fit(t1).transform(t1)
+
+val stemmer = new Stemmer()
+    .setInputCols("normal")
+    .setOutputCol("stem")
+
+val s1 = stemmer.transform(n1)
+
+val finisher = new Finisher()
+    .setInputCols("stem")
+    .setOutputCols("final")
+
+val f1 = finisher.transform(s1)
+
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.feature.StopWordsRemover
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.classification.LogisticRegression
+
+
+val hashingTF = new HashingTF()
+.setInputCol("filtered").setOutputCol("rawFeatures").setNumFeatures(10000)
+
+val featurizedData = hashingTF.transform(f1)
+
+val idf = new IDF().setInputCol("rawFeatures").setOutputCol("features")
+
+val idfModel = idf.fit(featurizedData)
+
+val rescaledData = idfModel.transform(featurizedData)
+
+val d2 = document.transform(testing)
+val t2 = token.fit(d2).transform(d2)
+val n2 = normalizer.fit(t2).transform(t2)
+val s2 = stemmer.transform(n2)
+val f2 = finisher.transform(s2)
+val featurizedData2 = hashingTF.transform(f2)
+val rescaledData2 = idfModel.transform(featurizedData2)
+
+val lr = new LogisticRegression().setMaxIter(10).setRegParam(0.01).setLabelCol("label").setElasticNetParam(0.5)
+
+val model = lr.fit(rescaledData)
+
+val preTr = model.transform(rescaledData)
+val preTs = model.transform(rescaledData2)
+
+val evaluator = new MulticlassClassificationEvaluator()
+                    .setLabelCol("label") 
+                    .setPredictionCol("prediction") 
+                    .setMetricName("accuracy")
+val training_accuracy = evaluator.evaluate(preTr)
+val testing_accuracy = evaluator.evaluate(preTs)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

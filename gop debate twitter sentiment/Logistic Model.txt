@@ -1,0 +1,151 @@
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+import com.johnsnowlabs.nlp.annotator._
+import com.johnsnowlabs.nlp.base._
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
+import spark.implicits._
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.feature.StopWordsRemover
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.classification.LogisticRegression
+
+val schema = StructType(Array(StructField("id", IntegerType, true),
+                              StructField("candidate", StringType, true),
+                              StructField("candidate_confidence", DoubleType, true),
+                              StructField("relevant_yn", StringType, true),
+                         StructField("relevant_yn_confidence", DoubleType, true),                                                   
+                           StructField("sentiment", StringType, true),                                                   
+                              StructField("sentiment_confidence", DoubleType, true),
+                              StructField("subject_matter", StringType, true),
+                              StructField("subject_matter_confidence", DoubleType, true),                               
+                              StructField("candidate_gold", StringType, true),
+                              StructField("name", StringType, true),
+                              StructField("relevant_yn_gold", StringType, true),
+                              StructField("retweet_count", DoubleType, true),
+                              StructField("sentiment_gold", StringType, true),
+                              StructField("subject_matter_gold", StringType, true),
+                              StructField("text", StringType, true),
+                              StructField("tweet_coord", StringType, true),
+                              StructField("tweet_created", StringType, true),
+                              StructField("tweet_id", StringType, true),
+                              StructField("tweet_location", StringType, true),
+                              StructField("user_timezone", StringType, true)                           
+                              
+                                                                                ))
+
+val df = spark.read.
+                    format("csv")
+                    .schema(schema)
+                    .option("header","true")
+                    .load("/home/harsh/Desktop/gop debate twitter/Sentiment.csv") 
+
+val df1 = df.select("candidate","candidate_confidence", "relevant_yn", "relevant_yn_confidence", "sentiment", "sentiment_confidence", "subject_matter", "subject_matter_confidence", "retweet_count", "text", "tweet_coord")
+
+val o = df1.select( concat($"candidate", lit(" "), $"subject_matter", lit(" "), $"text" ).alias("text"), $"candidate_confidence", $"relevant_yn", $"relevant_yn_confidence", $"sentiment", $"sentiment_confidence", $"subject_matter_confidence", $"retweet_count" )
+
+val p = o.na.drop
+
+
+def lo(i:String) : Double = { if(i.equals("no")){0} else{1} }
+val rel = udf(lo _)
+
+def pr(i:String) : Double = { if(i.equals("Negative")){0} 
+                              else if(i.equals("Neutral")){1}   
+                              else{2}  
+                             } 
+
+val sent = udf(pr _)
+
+
+def prep(d:String) :String = { d.replace("\"","").toLowerCase()
+      .replaceAll("\n", "")
+      .replaceAll("rt\\s+", "")
+      .replaceAll("\\s+@\\w+", "")
+      .replaceAll("@\\w+", "")
+      .replaceAll("\\s+#\\w+", "")
+      .replaceAll("#\\w+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+", "")
+      .replaceAll("[^\u0000-\uFFFF]","")
+      .replaceAll("(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])","")
+      .trim() 
+}
+ 
+val preProcess = udf(prep _)
+
+val data = p.select(preProcess($"text" ).alias("text"), $"candidate_confidence", rel($"relevant_yn").alias("relevant_yn"), $"relevant_yn_confidence", sent($"sentiment").alias("label"), $"sentiment_confidence", $"subject_matter_confidence", $"retweet_count")
+
+val document = new DocumentAssembler()
+    .setInputCol("text")
+    .setOutputCol("document")
+
+val d1 = document.transform(data)
+
+val token = new com.johnsnowlabs.nlp.annotator.Tokenizer()
+    .setInputCols("document")
+    .setOutputCol("token")
+
+val t1 = token.fit(d1).transform(d1)
+
+val normalizer = new Normalizer()
+    .setInputCols("token")
+    .setOutputCol("normal")
+
+val n1 = normalizer.fit(t1).transform(t1)
+
+val stemmer = new Stemmer()
+    .setInputCols("normal")
+    .setOutputCol("stem")
+
+val s1 = stemmer.transform(n1)
+
+val finisher = new Finisher()
+    .setInputCols("stem")
+    .setOutputCols("final")
+
+val f1 = finisher.transform(s1)
+
+val hashingTF = new HashingTF()
+.setInputCol("final").setOutputCol("rawFeatures").setNumFeatures(10000)
+
+val featurizedData = hashingTF.transform(f1)
+
+val idf = new IDF().setInputCol("rawFeatures").setOutputCol("features")
+
+val idfModel = idf.fit(featurizedData)
+
+val rescaledData = idfModel.transform(featurizedData)
+
+
+val assembler = new VectorAssembler()
+  .setInputCols(Array("candidate_confidence", "relevant_yn", "sentiment_confidence","subject_matter_confidence","retweet_count", "features"))
+  .setOutputCol("finalFeatures")
+
+val output = assembler.transform(rescaledData)
+
+val limited  = output.select($"label",$"finalFeatures".alias("features"))
+ 
+val Array(training, test) = limited.randomSplit(Array[Double](0.8,0.2))
+
+val lr = new LogisticRegression().setMaxIter(10).setRegParam(0.01).setLabelCol("label").setElasticNetParam(0.5)
+
+val model = lr.fit(training)
+
+val preTr = model.transform(training)
+val preTs = model.transform(test)
+
+val evaluator = new MulticlassClassificationEvaluator()
+                    .setLabelCol("label") 
+                    .setPredictionCol("prediction") 
+                    .setMetricName("accuracy") 
+
+val train_accuracy = evaluator.evaluate(preTr)
+val test_accuracy = evaluator.evaluate(preTs)
+

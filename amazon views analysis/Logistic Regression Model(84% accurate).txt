@@ -1,0 +1,59 @@
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.classification.LogisticRegression
+case class AmzView(label : Int, view : String)
+
+val train_path = "/home/harsh/Desktop/amazon views/1305_800230_compressed_train.ft.txt.bz2/train.ft.txt"
+val test_path = "/home/harsh/Desktop/amazon views/1305_800230_compressed_test.ft.txt.bz2/test.ft.txt"
+def pre_process(path:String) = { 
+val data = sc.textFile(path).map(attributes => AmzView(attributes(9), attributes.substring(11, attributes.length()).replace("\"","").toLowerCase()
+      .replaceAll("\n", "")
+      .replaceAll("rt\\s+", "")
+      .replaceAll("\\s+@\\w+", "")
+      .replaceAll("@\\w+", "")
+      .replaceAll("\\s+#\\w+", "")
+      .replaceAll("#\\w+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+", "")
+      .replaceAll("(?:https?|http?)://[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+\\s+", "")
+      .replaceAll("(?:https?|http?)//[\\w/%.-]+", "")
+      .replaceAll("[^\u0000-\uFFFF]","")
+      .replaceAll("(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])","") 
+     .trim() 
+  )).toDF()
+
+def lo(d:Int) :Int = {if(d==49){2} else{1}}
+val lco = udf(lo _)
+val p = data.select( (lco($"label")).alias("label"), $"view")
+
+
+val tokenizer = new Tokenizer().setInputCol("view").setOutputCol("words")
+val wordsData = tokenizer.transform(p)
+
+val hashingTF = new HashingTF()
+  .setInputCol("words").setOutputCol("rawFeatures").setNumFeatures(10000)
+
+val featurizedData = hashingTF.transform(wordsData)
+
+val idf = new IDF().setInputCol("rawFeatures").setOutputCol("features")
+val idfModel = idf.fit(featurizedData)
+
+val rescaledData = idfModel.transform(featurizedData)
+rescaledData
+}
+
+val training = pre_process(train_path)
+val test = pre_process(test_path)
+
+val lr = new LogisticRegression().setMaxIter(10).setRegParam(0.01).setLabelCol("label").setElasticNetParam(0.5)
+
+val model = lr.fit(training) 
+
+val evaluator = new MulticlassClassificationEvaluator()
+                    .setLabelCol("label") 
+                    .setPredictionCol("prediction") 
+                    .setMetricName("accuracy") 
+val predict_train = model.transform(training)
+val training_accuracy = evaluator.evaluate(predict_train)
+val predict_test = model.transform(test)
+val test_accuracy = evaluator.evaluate(predict_test)
